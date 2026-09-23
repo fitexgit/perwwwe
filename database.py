@@ -6,10 +6,14 @@ from typing import Dict, Any
 
 
 class Database:
-    def __init__(self, path: str = "data/db.json"):
+    def __init__(self, path: str = "/tmp/subbot_db.json"):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Read-only FS — fall back to /tmp
+            self.path = Path("/tmp/subbot_db.json")
         if not self.path.exists():
             self._write({"users": {}, "stats": {"total_jobs": 0, "today": {}, "premium": []}})
 

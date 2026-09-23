@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WAITING_VIDEO = 1
-BOT_VERSION = "2.0.1"
+BOT_VERSION = "2.0.2"
 
 
 def progress_bar(percent: int) -> str:
