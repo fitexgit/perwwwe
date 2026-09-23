@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 import tempfile
@@ -12,7 +13,7 @@ import static_ffmpeg
 from config import Config
 
 logger = logging.getLogger(__name__)
-PROCESSOR_VERSION = "2.0.2"
+PROCESSOR_VERSION = "2.0.3"
 
 
 class SubtitleProcessor:
@@ -36,6 +37,15 @@ class SubtitleProcessor:
             logger.warning(f"static-ffmpeg setup failed: {e}")
 
     def _load_model(self):
+        # Read-only app FS — force all caches into /tmp
+        cache_root = "/tmp/hf_cache"
+        os.makedirs(cache_root, exist_ok=True)
+        os.environ["HF_HOME"] = cache_root
+        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_root
+        os.environ["TRANSFORMERS_CACHE"] = cache_root
+        os.environ["XDG_CACHE_HOME"] = "/tmp"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
         logger.info(
             f"Loading Whisper: {self.config.WHISPER_MODEL} "
             f"device={self.config.WHISPER_DEVICE} "
@@ -45,6 +55,7 @@ class SubtitleProcessor:
             self.config.WHISPER_MODEL,
             device=self.config.WHISPER_DEVICE,
             compute_type=self.config.WHISPER_COMPUTE_TYPE,
+            download_root=cache_root,
         )
         logger.info("Whisper model loaded successfully")
 
