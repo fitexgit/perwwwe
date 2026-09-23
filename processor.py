@@ -12,7 +12,7 @@ import static_ffmpeg
 from config import Config
 
 logger = logging.getLogger(__name__)
-PROCESSOR_VERSION = "2.0.0"
+PROCESSOR_VERSION = "2.0.1"
 
 
 class SubtitleProcessor:

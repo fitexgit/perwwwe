@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WAITING_VIDEO = 1
-BOT_VERSION = "2.0.0"
+BOT_VERSION = "2.0.1"
 
 
 def progress_bar(percent: int) -> str:
@@ -360,10 +360,42 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def start_health_server():
+    """Minimal HTTP server so Railway/platform healthcheck on PORT succeeds."""
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    port = int(os.environ.get("PORT", "3000"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format, *args):
+            return  # silence access logs
+
+    def run():
+        try:
+            server = HTTPServer(("0.0.0.0", port), Handler)
+            logger.info(f"Health server listening on 0.0.0.0:{port}")
+            server.serve_forever()
+        except Exception as e:
+            logger.warning(f"Health server failed: {e}")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+
 def main():
     config = Config()
     db = Database()
     processor = SubtitleProcessor(config)
+
+    # Platform expects an open TCP port (healthcheck)
+    start_health_server()
 
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.bot_data["config"] = config
