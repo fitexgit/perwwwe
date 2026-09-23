@@ -2,12 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Writable caches inside image layers (populated at build time)
-ENV HF_HOME=/app/models
-ENV HUGGINGFACE_HUB_CACHE=/app/models
-ENV TRANSFORMERS_CACHE=/app/models
-ENV XDG_CACHE_HOME=/app/models
-ENV TMPDIR=/tmp
+ARG WHISPER_MODEL=tiny
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TMPDIR=/tmp \
+    MODEL_CACHE_DIR=/app/models \
+    WHISPER_MODEL=${WHISPER_MODEL} \
+    WHISPER_DEVICE=cpu \
+    WHISPER_COMPUTE_TYPE=int8 \
+    WHISPER_CPU_THREADS=2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -16,15 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download Whisper model into the image (avoids runtime /tmp disk limit)
-# base ≈ 145MB — fits constrained hosts; override with WHISPER_MODEL at runtime only if already cached
-ARG WHISPER_MODEL=base
-RUN mkdir -p /app/models && python -c "\
-from faster_whisper import WhisperModel;\
-print('Downloading Whisper model: base');\
-WhisperModel('base', device='cpu', compute_type='int8', download_root='/app/models');\
-print('Model ready');\
-"
+# Bake weights into the image. On PaaS/free plans the application filesystem
+# may be read-only and /tmp may be too small for downloading Whisper at boot.
+RUN mkdir -p /app/models && \
+    HF_HOME=/app/models HUGGINGFACE_HUB_CACHE=/app/models \
+    python -c "from faster_whisper import WhisperModel; import os; model=os.environ['WHISPER_MODEL']; print('Baking Whisper model:', model); WhisperModel(model, device='cpu', compute_type='int8', download_root='/app/models'); print('Model ready')"
 
 COPY . .
 

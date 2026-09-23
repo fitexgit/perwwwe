@@ -1,26 +1,69 @@
-# English Subtitle Bot v2.0
+# ربات زیرنویس انگلیسی تلگرام
 
-Telegram bot: video → English SRT (Whisper).
+نسخهٔ پایدارشدهٔ ربات تولید زیرنویس SRT با `faster-whisper`؛ مناسب استقرار Docker/PaaS با فایل‌سیستم فقط‌خواندنی و فضای موقت محدود.
 
-## Features
-- English SRT only (no translation)
-- Large files via Telethon (API_ID + API_HASH) up to 400MB
-- faster-whisper (small/medium on strong servers)
-- Progress updates while transcribing
-- Optional hardsub burn
+## رفع خطای اجرای PXXL
 
-## Env
-See `.env.example`
+خطاها به دو علت اصلی بودند:
 
-## Run
+1. مدل Whisper در زمان شروع برنامه از Hugging Face دانلود می‌شد؛ فایل‌سیستم `/app` فقط‌خواندنی بود و فضای `/tmp` هم برای مدل‌هایی مثل `small` کافی نبود.
+2. دیتابیس در مسیر نسبی `data/` ساخته می‌شد که روی محیط فقط‌خواندنی قابل‌نوشتن نیست.
+
+در این نسخه، مدل `tiny` هنگام **ساخت Docker image** داخل `/app/models` قرار می‌گیرد و برنامه آن را مستقیماً از همان فایل‌های محلی می‌خواند؛ پس هنگام روشن‌شدن به دانلود مدل یا نوشتن در `/app` نیاز نیست. دیتابیس پیش‌فرض در `/tmp` و فایل‌های موقت نیز در همان فضای قابل‌نوشتن ذخیره می‌شوند.
+
+## راه‌اندازی در PXXL
+
+1. کل محتوای این پوشه را جایگزین نسخهٔ فعلی پروژه کنید.
+2. یک **Build/Deploy تازه با پاک‌کردن build cache** انجام دهید تا Dockerfile جدید واقعاً اجرا و مدل داخل image بسته‌بندی شود. Restart سادهٔ کانتینر کافی نیست.
+3. برای پلن رایگان متغیرها را این‌گونه تنظیم کنید:
+   - `WHISPER_MODEL=tiny`
+   - `WHISPER_DEVICE=cpu`
+   - `WHISPER_COMPUTE_TYPE=int8`
+   - `WHISPER_CPU_THREADS=2`
+   - `MODEL_CACHE_DIR=/app/models`
+   - `DATABASE_PATH=/tmp/subbot_db.json`
+   - `TEMP_DIR=/tmp`
+   - `PORT=3000` (یا پورتی که پنل به سرویس اختصاص داده است)
+4. پس از Build، در لاگ باید `source=baked model` و `Whisper model loaded successfully` دیده شود. اگر `runtime download` دیدید، image جدید ساخته نشده یا مدل انتخاب‌شده با مدل داخل image یکی نیست.
+
+برای مدل دیگری مانند `base` یا `small`، هنگام Build مقدار build argument به نام `WHISPER_MODEL` را به همان مدل تغییر دهید و سپس همان مقدار را در متغیر زمان اجرا نیز قرار دهید. آن مدل هم داخل image دانلود/بسته‌بندی می‌شود. روی پلن رایگان، مدل بزرگ‌تر می‌تواند از محدودیت فضا، RAM یا CPU عبور کند؛ مدل را صرفاً با تغییر متغیر Runtime بزرگ‌تر نکنید.
+
+## متغیرهای محیطی
+
+حداقل لازم:
+
+```text
+BOT_TOKEN=توکن-جدید-ربات
+ADMIN_IDS=شناسه-عددی-ادمین
+WHISPER_MODEL=tiny
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+MODEL_CACHE_DIR=/app/models
+DATABASE_PATH=/tmp/subbot_db.json
+TEMP_DIR=/tmp
+PORT=3000
+```
+
+برای دریافت فایل‌های بزرگ‌تر از محدودیت Bot API، `API_ID` و `API_HASH` تلگرام نیز لازم است. `MAX_FILE_SIZE_MB` اندازهٔ مجاز ورودی، `MAX_VIDEO_DURATION` حداکثر مدت ویدئو به ثانیه، و `DAILY_LIMIT_FREE` سهمیهٔ روزانه را مشخص می‌کنند. پیش‌فرض‌ها را می‌توانید در `.env.example` ببینید.
+
+> `/tmp` در اغلب پلن‌های رایگان ماندگار نیست؛ آمار و تنظیمات کاربران پس از حذف/تعویض کانتینر ممکن است پاک شود. برای ماندگاری، `DATABASE_PATH` را به مسیر یک Volume قابل‌نوشتن متصل کنید.
+
+## اجرای محلی
+
+نیازمند Python 3.11 و برنامهٔ سیستمی `ffmpeg`/`ffprobe` است:
+
 ```bash
 pip install -r requirements.txt
+cp .env.example .env
 python bot.py
 ```
 
-## Model tips
-| Server | Model | Device |
-|--------|-------|--------|
-| Weak (1GB) | base / tiny | cpu + int8 |
-| Strong CPU | small | cpu + int8 |
-| GPU | medium / large-v3 | cuda + float16 |
+## تغییرات پایداری
+
+- بارگذاری محلی مدل از Image و جلوگیری از دانلود ناخواسته در زمان اجرا
+- خطای روشن و زودهنگام در صورت انتخاب مدلی که داخل Image نیست یا کمبود فضای دیسک
+- سرور health check پیش از بارگذاری Whisper
+- دیتابیس JSON با نوشتن اتمیک و مسیر قابل‌تنظیم، به‌جای اتکا به مسیر فقط‌خواندنی
+- اعمال درست سهمیهٔ `DAILY_LIMIT_FREE`
+- محدودیت مدت ویدئو، timeout برای FFmpeg و کاهش مصرف CPU/RAM در Whisper
+- پاک‌سازی فایل‌های صوتی، ویدئویی و پوشه‌های موقت پس از پردازش

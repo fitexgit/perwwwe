@@ -4,16 +4,16 @@ import logging
 import tempfile
 import subprocess
 import shutil
+import glob
 from pathlib import Path
 from typing import Callable, Optional, Awaitable
 
 from faster_whisper import WhisperModel
-import static_ffmpeg
 
 from config import Config
 
 logger = logging.getLogger(__name__)
-PROCESSOR_VERSION = "2.0.4"
+PROCESSOR_VERSION = "2.1.0"
 
 
 class SubtitleProcessor:
@@ -25,52 +25,71 @@ class SubtitleProcessor:
         self._load_model()
 
     def _setup_ffmpeg(self):
-        try:
-            static_ffmpeg.add_paths()
-            ffmpeg_bin = shutil.which("ffmpeg")
-            if ffmpeg_bin:
-                self.ffmpeg_path = ffmpeg_bin
-                logger.info(f"Static ffmpeg ready at: {self.ffmpeg_path}")
-            else:
-                logger.warning("ffmpeg not found in PATH")
-        except Exception as e:
-            logger.warning(f"static-ffmpeg setup failed: {e}")
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            raise RuntimeError("ffmpeg is missing from PATH; install the system ffmpeg package.")
+        if not shutil.which("ffprobe"):
+            raise RuntimeError("ffprobe is missing from PATH; install the system ffmpeg package.")
+        self.ffmpeg_path = ffmpeg_bin
+        logger.info("System ffmpeg ready at: %s", self.ffmpeg_path)
 
     def _load_model(self):
-        # Prefer model baked into image at /app/models; fall back to /tmp if needed
-        os.environ.setdefault("HF_HOME", "/app/models")
-        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/app/models")
-        os.environ.setdefault("TRANSFORMERS_CACHE", "/app/models")
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-
-        candidates = ["/app/models", "/tmp/hf_cache"]
-        download_root = None
-        for path in candidates:
-            try:
-                os.makedirs(path, exist_ok=True)
-                # quick write test
-                test = Path(path) / ".write_test"
-                test.write_text("ok")
-                test.unlink(missing_ok=True)
-                download_root = path
-                break
-            except OSError:
-                continue
-        if download_root is None:
-            download_root = "/tmp"
-            os.makedirs(download_root, exist_ok=True)
+        cache_root = Path(self.config.MODEL_CACHE_DIR)
+        repo_cache = cache_root / f"models--Systran--faster-whisper-{self.config.WHISPER_MODEL}"
+        snapshots = sorted(glob.glob(str(repo_cache / "snapshots" / "*")))
+        local_models = [
+            Path(path) for path in snapshots
+            if (Path(path) / "model.bin").is_file()
+        ]
+        direct_model = cache_root / self.config.WHISPER_MODEL
+        model_source = str(local_models[-1]) if local_models else (
+            str(direct_model) if (direct_model / "model.bin").is_file() else None
+        )
 
         logger.info(
             f"Loading Whisper: {self.config.WHISPER_MODEL} "
             f"device={self.config.WHISPER_DEVICE} "
             f"compute={self.config.WHISPER_COMPUTE_TYPE} "
-            f"root={download_root} (v{PROCESSOR_VERSION})"
+            f"source={'baked model' if model_source else 'runtime download'} "
+            f"(v{PROCESSOR_VERSION})"
         )
+        if model_source is None:
+            if os.getenv("WHISPER_ALLOW_RUNTIME_DOWNLOAD", "0").lower() not in ("1", "true", "yes"):
+                raise RuntimeError(
+                    f"Whisper model '{self.config.WHISPER_MODEL}' is not included in this image. "
+                    "Set WHISPER_MODEL=tiny (the free-tier default) or rebuild with "
+                    "WHISPER_MODEL set to the desired model. Runtime downloads are disabled."
+                )
+            download_root = Path(self.config.TEMP_DIR) / "hf_cache"
+            download_root.mkdir(parents=True, exist_ok=True)
+            available_mb = shutil.disk_usage(download_root).free / (1024 * 1024)
+            required_mb = {
+                "tiny": 100, "base": 200, "small": 600, "medium": 1800,
+                "large-v2": 3200, "large-v3": 3200,
+            }.get(self.config.WHISPER_MODEL, 1200)
+            if available_mb < required_mb:
+                raise RuntimeError(
+                    f"Not enough writable disk for Whisper '{self.config.WHISPER_MODEL}': "
+                    f"{available_mb:.0f} MB free, approximately {required_mb} MB required. "
+                    "Bake the model into the image instead."
+                )
+            model_source = self.config.WHISPER_MODEL
+            download_root = str(download_root)
+        else:
+            download_root = None
+
+        kwargs = {
+            "device": self.config.WHISPER_DEVICE,
+            "compute_type": self.config.WHISPER_COMPUTE_TYPE,
+            "cpu_threads": self.config.WHISPER_CPU_THREADS,
+            "num_workers": 1,
+        }
+        if download_root:
+            kwargs["download_root"] = download_root
         self.model = WhisperModel(
-            self.config.WHISPER_MODEL,
-            device=self.config.WHISPER_DEVICE,
-            compute_type=self.config.WHISPER_COMPUTE_TYPE,
-            download_root=download_root,
+            model_source,
+            **kwargs,
         )
         logger.info("Whisper model loaded successfully")
 
@@ -81,8 +100,8 @@ class SubtitleProcessor:
         progress_callback: Optional[Callable[[str, int], Awaitable[None]]] = None,
         burn_subtitles: bool = False,
     ) -> dict:
-        temp_dir = Path(tempfile.mkdtemp(prefix=f"proc_{user_id}_"))
-        result = {"srt_path": None, "video_path": None}
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"proc_{user_id}_", dir=self.config.TEMP_DIR))
+        result = {"srt_path": None, "video_path": None, "work_dir": str(temp_dir)}
 
         try:
             if progress_callback:
@@ -145,18 +164,46 @@ class SubtitleProcessor:
             if progress_callback:
                 await progress_callback("Done", 100)
             return result
-        except Exception as e:
+        except Exception:
             logger.exception("Processing failed")
-            raise e
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
     async def _extract_audio(self, video_path: str, audio_path: str):
         def _run():
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", video_path,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode == 0 and probe.stdout.strip():
+                duration = float(probe.stdout.strip())
+                if duration > self.config.MAX_VIDEO_DURATION:
+                    raise RuntimeError(
+                        f"Video is {duration / 60:.1f} minutes; maximum allowed is "
+                        f"{self.config.MAX_VIDEO_DURATION / 60:.0f} minutes."
+                    )
+                # 16 kHz, mono, signed 16-bit PCM is ~1.83 MiB/minute.
+                audio_required_mb = duration * 32000 / (1024 * 1024) + 12
+                free_mb = shutil.disk_usage(Path(audio_path).parent).free / (1024 * 1024)
+                if free_mb < audio_required_mb:
+                    raise RuntimeError(
+                        f"Not enough temporary disk for extracted audio: {free_mb:.0f} MB "
+                        f"free, about {audio_required_mb:.0f} MB required. "
+                        "Use a shorter video or allocate more writable storage."
+                    )
             cmd = [
                 self.ffmpeg_path, "-y", "-i", video_path,
+                "-vn",
                 "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
                 audio_path,
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=self.config.MAX_VIDEO_DURATION + 180,
+            )
             if r.returncode != 0:
                 raise RuntimeError(f"ffmpeg extract failed: {r.stderr[:400]}")
         await asyncio.to_thread(_run)
@@ -168,10 +215,10 @@ class SubtitleProcessor:
 
         segments, info = self.model.transcribe(
             audio_path,
-            beam_size=5,
+            beam_size=self.config.WHISPER_BEAM_SIZE,
             language=lang,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
+            vad_parameters=dict(min_silence_duration_ms=400),
         )
         result = []
         for seg in segments:
@@ -216,7 +263,10 @@ class SubtitleProcessor:
                 "-preset", "fast", "-crf", "23",
                 output_path,
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=self.config.MAX_VIDEO_DURATION * 2 + 300,
+            )
             if r.returncode != 0:
                 raise RuntimeError(f"ffmpeg burn failed: {r.stderr[:400]}")
         await asyncio.to_thread(_run)

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import tempfile
 import shutil
+import html
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WAITING_VIDEO = 1
-BOT_VERSION = "2.0.4"
+BOT_VERSION = "2.1.0"
 
 
 def progress_bar(percent: int) -> str:
@@ -159,6 +160,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not video:
         await message.reply_text("Please send a valid video file.")
         return WAITING_VIDEO
+    if message.document and not message.video:
+        filename = (message.document.file_name or "").lower()
+        mime_type = (message.document.mime_type or "").lower()
+        valid_extension = filename.endswith(
+            (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpeg", ".mpg", ".ts")
+        )
+        if not mime_type.startswith("video/") and not valid_extension:
+            await message.reply_text("این فایل ویدئو نیست؛ لطفاً یک ویدئو بفرستید.")
+            return ConversationHandler.END
 
     file_size_mb = (video.file_size or 0) / (1024 * 1024)
     use_mtproto = bool(config.API_ID and config.API_HASH)
@@ -176,6 +186,18 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    Path(config.TEMP_DIR).mkdir(parents=True, exist_ok=True)
+    free_mb = shutil.disk_usage(config.TEMP_DIR).free / (1024 * 1024)
+    estimated_required_mb = file_size_mb * 1.5 + 20
+    if free_mb < estimated_required_mb:
+        await message.reply_text(
+            f"⚠️ فضای موقت سرور کافی نیست: {free_mb:.0f} MB آزاد است؛ "
+            f"برای این فایل دست‌کم حدود {estimated_required_mb:.0f} MB لازم است. "
+            "ویدئوی کوتاه‌تر/کم‌حجم‌تر بفرستید یا فضای ماندگار بیشتری به سرویس بدهید.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
     status_msg = await message.reply_text(
         f"⏳ Starting...\n{progress_bar(5)}\n📦 Size: {file_size_mb:.1f} MB",
         parse_mode=ParseMode.MARKDOWN,
@@ -184,12 +206,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = await db.get_user_settings(user.id)
     burn = settings.get("burn_subtitles", False)
     temp_dir = None
+    result = None
 
     try:
         await context.bot.send_chat_action(
             chat_id=user.id, action=ChatAction.UPLOAD_DOCUMENT
         )
-        temp_dir = Path(tempfile.mkdtemp(prefix="subbot_"))
+        Path(config.TEMP_DIR).mkdir(parents=True, exist_ok=True)
+        temp_dir = Path(tempfile.mkdtemp(prefix="subbot_", dir=config.TEMP_DIR))
         input_path = temp_dir / f"input_{user.id}.mp4"
 
         # Download
@@ -268,14 +292,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error processing video")
         try:
             await status_msg.edit_text(
-                f"❌ Error:\n`{str(e)[:250]}`",
-                parse_mode=ParseMode.MARKDOWN,
+                f"❌ Error:\n<code>{html.escape(str(e)[:250])}</code>",
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             await message.reply_text(f"❌ Error: {str(e)[:250]}")
     finally:
         if temp_dir and Path(temp_dir).exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
+        if result and result.get("work_dir"):
+            shutil.rmtree(result["work_dir"], ignore_errors=True)
 
     await message.reply_text(
         "You can send another video.",
@@ -390,17 +416,12 @@ def start_health_server():
 
 
 def main():
-    # Prefer image-baked model dir; /tmp only as fallback
-    os.environ.setdefault("HF_HOME", "/app/models")
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/app/models")
-    os.environ.setdefault("TRANSFORMERS_CACHE", "/app/models")
-
     config = Config()
-    db = Database()
-    processor = SubtitleProcessor(config)
-
-    # Platform expects an open TCP port (healthcheck)
+    # Start the platform health endpoint before initializing Whisper. Model
+    # loading can take time even when weights are baked into the image.
     start_health_server()
+    db = Database(config.DATABASE_PATH, config.DAILY_LIMIT_FREE)
+    processor = SubtitleProcessor(config)
 
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.bot_data["config"] = config
