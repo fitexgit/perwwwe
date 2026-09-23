@@ -13,7 +13,7 @@ import static_ffmpeg
 from config import Config
 
 logger = logging.getLogger(__name__)
-PROCESSOR_VERSION = "2.0.3"
+PROCESSOR_VERSION = "2.0.4"
 
 
 class SubtitleProcessor:
@@ -37,25 +37,40 @@ class SubtitleProcessor:
             logger.warning(f"static-ffmpeg setup failed: {e}")
 
     def _load_model(self):
-        # Read-only app FS — force all caches into /tmp
-        cache_root = "/tmp/hf_cache"
-        os.makedirs(cache_root, exist_ok=True)
-        os.environ["HF_HOME"] = cache_root
-        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_root
-        os.environ["TRANSFORMERS_CACHE"] = cache_root
-        os.environ["XDG_CACHE_HOME"] = "/tmp"
-        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        # Prefer model baked into image at /app/models; fall back to /tmp if needed
+        os.environ.setdefault("HF_HOME", "/app/models")
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/app/models")
+        os.environ.setdefault("TRANSFORMERS_CACHE", "/app/models")
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+        candidates = ["/app/models", "/tmp/hf_cache"]
+        download_root = None
+        for path in candidates:
+            try:
+                os.makedirs(path, exist_ok=True)
+                # quick write test
+                test = Path(path) / ".write_test"
+                test.write_text("ok")
+                test.unlink(missing_ok=True)
+                download_root = path
+                break
+            except OSError:
+                continue
+        if download_root is None:
+            download_root = "/tmp"
+            os.makedirs(download_root, exist_ok=True)
 
         logger.info(
             f"Loading Whisper: {self.config.WHISPER_MODEL} "
             f"device={self.config.WHISPER_DEVICE} "
-            f"compute={self.config.WHISPER_COMPUTE_TYPE} (v{PROCESSOR_VERSION})"
+            f"compute={self.config.WHISPER_COMPUTE_TYPE} "
+            f"root={download_root} (v{PROCESSOR_VERSION})"
         )
         self.model = WhisperModel(
             self.config.WHISPER_MODEL,
             device=self.config.WHISPER_DEVICE,
             compute_type=self.config.WHISPER_COMPUTE_TYPE,
-            download_root=cache_root,
+            download_root=download_root,
         )
         logger.info("Whisper model loaded successfully")
 

@@ -17,7 +17,7 @@ class Config:
         self.API_HASH = os.getenv("API_HASH", "")
 
         # Strong server defaults: small model is good balance
-        self.WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+        self.WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
         self.WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
         self.WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
         self.WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")

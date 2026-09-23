@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WAITING_VIDEO = 1
-BOT_VERSION = "2.0.3"
+BOT_VERSION = "2.0.4"
 
 
 def progress_bar(percent: int) -> str:
@@ -390,12 +390,10 @@ def start_health_server():
 
 
 def main():
-    # Force writable cache dirs before any HF / whisper import side-effects
-    os.makedirs("/tmp/hf_cache", exist_ok=True)
-    os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/hf_cache")
-    os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf_cache")
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    # Prefer image-baked model dir; /tmp only as fallback
+    os.environ.setdefault("HF_HOME", "/app/models")
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/app/models")
+    os.environ.setdefault("TRANSFORMERS_CACHE", "/app/models")
 
     config = Config()
     db = Database()
