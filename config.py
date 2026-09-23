@@ -27,8 +27,8 @@ class Config:
         self.API_ID = _int_env("API_ID", 0, minimum=0)
         self.API_HASH = os.getenv("API_HASH", "").strip()
 
-        # The free-tier image includes tiny. Select another model only if that
-        # model is also baked into the image or storage is known to be adequate.
+        # Python-only PaaS deployments fetch the selected model into writable
+        # temporary storage on first start.
         self.WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny").strip()
         self.WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
         self.WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
@@ -40,7 +40,9 @@ class Config:
         self.DAILY_LIMIT_FREE = _int_env("DAILY_LIMIT_FREE", 20)
         self.MAX_VIDEO_DURATION = _int_env("MAX_VIDEO_DURATION", 3600)
         self.DATABASE_PATH = os.getenv("DATABASE_PATH", "/tmp/subbot_db.json")
-        self.MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/app/models")
+        self.MODEL_CACHE_DIR = os.getenv(
+            "MODEL_CACHE_DIR", os.getenv("HF_HOME", "/tmp/hf_cache")
+        )
         self.TEMP_DIR = os.getenv("TEMP_DIR", "/tmp")
 
         self.FONT_PATH = os.getenv(

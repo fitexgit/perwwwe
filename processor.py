@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, Optional, Awaitable
 
 from faster_whisper import WhisperModel
+import static_ffmpeg
 
 from config import Config
 
@@ -25,6 +26,10 @@ class SubtitleProcessor:
         self._load_model()
 
     def _setup_ffmpeg(self):
+        try:
+            static_ffmpeg.add_paths()
+        except Exception as exc:
+            logger.warning("Could not prepare static ffmpeg: %s", exc)
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
             raise RuntimeError("ffmpeg is missing from PATH; install the system ffmpeg package.")
@@ -36,6 +41,16 @@ class SubtitleProcessor:
     def _load_model(self):
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         cache_root = Path(self.config.MODEL_CACHE_DIR)
+        # Python buildpacks may leave downloaded wheel caches behind. Removing
+        # those is safe and can free the small writable space needed by tiny.
+        for transient_cache in (
+            Path.home() / ".cache" / "pip",
+            Path("/tmp/pip-ephem-wheel-cache"),
+        ):
+            try:
+                shutil.rmtree(transient_cache, ignore_errors=True)
+            except OSError:
+                pass
         repo_cache = cache_root / f"models--Systran--faster-whisper-{self.config.WHISPER_MODEL}"
         snapshots = sorted(glob.glob(str(repo_cache / "snapshots" / "*")))
         local_models = [
@@ -55,24 +70,24 @@ class SubtitleProcessor:
             f"(v{PROCESSOR_VERSION})"
         )
         if model_source is None:
-            if os.getenv("WHISPER_ALLOW_RUNTIME_DOWNLOAD", "0").lower() not in ("1", "true", "yes"):
+            if os.getenv("WHISPER_ALLOW_RUNTIME_DOWNLOAD", "1").lower() not in ("1", "true", "yes"):
                 raise RuntimeError(
-                    f"Whisper model '{self.config.WHISPER_MODEL}' is not included in this image. "
-                    "Set WHISPER_MODEL=tiny (the free-tier default) or rebuild with "
-                    "WHISPER_MODEL set to the desired model. Runtime downloads are disabled."
+                    f"Whisper model '{self.config.WHISPER_MODEL}' is not cached locally "
+                    "and runtime downloads are disabled. Enable WHISPER_ALLOW_RUNTIME_DOWNLOAD."
                 )
-            download_root = Path(self.config.TEMP_DIR) / "hf_cache"
+            download_root = cache_root
             download_root.mkdir(parents=True, exist_ok=True)
             available_mb = shutil.disk_usage(download_root).free / (1024 * 1024)
             required_mb = {
-                "tiny": 100, "base": 200, "small": 600, "medium": 1800,
-                "large-v2": 3200, "large-v3": 3200,
-            }.get(self.config.WHISPER_MODEL, 1200)
+                "tiny": 120, "tiny.en": 120, "base": 220, "base.en": 220,
+                "small": 600, "small.en": 600, "medium": 1800, "medium.en": 1800,
+                "large-v2": 3200, "large-v3": 3200, "large": 3200,
+            }.get(self.config.WHISPER_MODEL, 3200)
             if available_mb < required_mb:
                 raise RuntimeError(
                     f"Not enough writable disk for Whisper '{self.config.WHISPER_MODEL}': "
-                    f"{available_mb:.0f} MB free, approximately {required_mb} MB required. "
-                    "Bake the model into the image instead."
+                    f"{available_mb:.0f} MB free, allow about {required_mb} MB. "
+                    "The PaaS service needs more writable storage, even for the tiny model."
                 )
             model_source = self.config.WHISPER_MODEL
             download_root = str(download_root)
